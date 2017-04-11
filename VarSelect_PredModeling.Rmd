@@ -1,0 +1,253 @@
+---
+title: "Variable Selection & Predictive Modeling"
+author: "Tianlin Duan"
+date: "April 11, 2017"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+#### Preparation  
+```{r read-in, echo=FALSE}
+suppressMessages(library(dplyr))
+suppressMessages(library(reshape2))
+suppressMessages(library(MASS))
+suppressMessages(library(leaps))
+suppressMessages(library(glmnet))
+require(caret)
+suppressMessages(library(randomForest))
+suppressMessages(library(ggplot2))
+
+# Read in Data
+e = read.csv("FULL.csv",stringsAsFactors = F)
+# Clean-up
+e = e %>%
+  mutate(Dept.Name = as.factor(Dept.Name),
+         AcctgMonth = as.Date(AcctgMonth,"%m/%d/%Y"),
+         PrimaryUse = as.factor(PrimaryUse))
+# Separate train and test subsets
+train = subset(e,e$AcctgMonth < as.Date("7/1/2015","%m/%d/%Y"))
+test = subset(e,e$AcctgMonth >= as.Date("7/1/2015","%m/%d/%Y"))
+```  
+
+## Variable Selection  
+#### Stepwise method    
+**1. AIC  **  
+```{r AIC, echo=FALSE}
+# AIC (the lower the better)
+fit.A <- lm(emission.sum ~ dept.total.area + PrimaryUse 
+          + TAVG + TMAX + TMIN + HTDD + CLDD + EMXT + EMNT 
+          + DX90 + DX32 + DT32 + PRCP + EMXP + DP01 + DP05 + DP10
+          + sum.n_course., data = e)
+fit.A <- glm(emission.sum ~ ., data = e)
+step.A <- stepAIC(fit.A, direction="both",trace = F)
+step.A$anova
+```  
+Selected variables:  
+dept.total.area, PrimaryUse, TAVG, TMAX, TMIN, CLDD, sum.n_course.  
+
+**2. BIC  **  
+```{r BIC, echo=FALSE}
+# BIC (lower)
+leaps=regsubsets(emission.sum ~ dept.total.area + PrimaryUse 
+                 + TAVG + TMAX + TMIN + HTDD + CLDD + EMXT + EMNT 
+                 + DX90 + DX32 + DT32 + PRCP + EMXP + DP01 + DP05 
+                 + DP10 + sum.n_course., data = e, nbest=5)
+plot(leaps, scale = "bic")  
+```  
+
+Selected variables:  
+dept.total.area, PrimaryUse, sum.n_course.  
+
+
+**3. Adjusted R^2 **  
+```{r Adjusted R^2, echo=FALSE}
+plot(leaps, scale="adjr2")  
+```  
+
+Selected variables:  
+dept.total.area, PrimaryUse, CLDD, DX32, sum.n_course.  
+
+
+#### LASSO  
+```{r LASSO, echo=FALSE}
+X = model.matrix(emission.sum ~ dept.total.area + PrimaryUse 
+                 + TAVG + TMAX + TMIN + HTDD + CLDD + EMXT + EMNT 
+                 + DX90 + DX32 + DT32 + PRCP + EMXP + DP01 + DP05 + DP10
+                 + sum.n_course. -1, data = train)
+Y = train$emission.sum
+
+# Fit a lasso model
+lasso = cv.glmnet(X, Y)
+
+# Plot mean-squared error as a function of the shrinkage parameter
+plot(lasso)
+
+# Find the optimal value of the shrinkage parameter
+print(paste0("lambda.min= ",lasso$lambda.min))
+#lasso$lambda.1se #7.81
+
+# Find the coefficients of the optimal model
+#coef(lasso, s = "lambda.1se") #dept.total.area, PrimaryUse ONLY
+print("Coefficients of the optimal model (lambda.min):")  
+coef(lasso, s = "lambda.min") #dept.total.area, PrimaryUse, DX32, sum.n_course
+
+# Predict and save fitted values from the lasso model
+la.X = model.matrix(emission.sum ~ dept.total.area + PrimaryUse 
+                 + TAVG + TMAX + TMIN + HTDD + CLDD + EMXT + EMNT 
+                 + DX90 + DX32 + DT32 + PRCP + EMXP + DP01 + DP05 + DP10
+                 + sum.n_course. -1, data = test)
+
+lasso.fitted.lse = predict(lasso, newx = la.X, s = "lambda.1se",type="response")
+lasso.fitted.min = predict(lasso, newx = la.X, s = "lambda.min",type="response")
+
+# Plot the predicted values versus the truth
+#plot_data = data.frame(test$emission.sum[1:318], lasso.fitted.lse, lasso.fitted.min)
+#names(plot_data) = c("TrueEmission", "Lasso.lse", "Lasso.min")
+#p = ggplot(plot_data, aes(y = TrueEmission))
+#p + geom_point(aes(x = Lasso.lse), color="Blue") +
+#  geom_point(aes(x = Lasso.min), color="red") +
+#  geom_abline(slope=1) + xlab("Fitted Value")
+```  
+Selected variables (lambda.min):  
+dept.total.area, PrimaryUse, DX32, sum.n_course.  
+
+#### Elastic Net  
+```{r Elastic Net I, echo=FALSE}
+lambda.grid <- 10^seq(2,-2,length = 100)
+alpha.grid <- seq(0,1,length = 10)
+
+trnCtrl = trainControl(
+  method = "repeatedCV",
+  number = 10,
+  repeats = 5
+)
+
+srchGrd = expand.grid(.alpha = alpha.grid, .lambda = lambda.grid)
+
+set.seed(1)
+en.train <- train(emission.sum ~ dept.total.area + PrimaryUse 
+                  + TAVG + TMAX + TMIN + HTDD + CLDD + EMXT + EMNT 
+                  + DX90 + DX32 + DT32 + PRCP + EMXP + DP01 + DP05 + DP10
+                  + sum.n_course., data = train,
+                  method = "glmnet",
+                  tuneGrid = srchGrd,
+                  trControl = trnCtrl,
+                  standardize = TRUE,
+                  maxit = 1000000)
+
+plot(en.train)  
+
+print("Best tune parameters")
+en.train$bestTune # alpha = 1, lambda = 1.668
+
+enet = en.train$finalModel  
+
+print("Coefficients of the optimal model (lambda.min):")
+coef(enet, s = en.train$bestTune$lambda)
+```  
+Selected variables:  
+dept.total.area, PrimaryUse, DX32, sum.n_course.  
+
+```{r Elastic Net II, echo=FALSE}
+en.X = model.matrix(emission.sum ~ dept.total.area + PrimaryUse 
+                 + TAVG + TMAX + TMIN + HTDD + CLDD + EMXT + EMNT 
+                 + DX90 + DX32 + DT32 + PRCP + EMXP + DP01 + DP05 + DP10
+                 + sum.n_course. -1, data = train)
+en.Y = train$emission.sum
+en = cv.glmnet(en.X, en.Y, nfolds=10)
+
+print(paste0("lambda.min= ",en$lambda.min))  
+#en$lambda.1se
+
+print("Coefficients of the optimal model (lambda.min):")
+coef(en, s = "lambda.min")
+
+# Predict and save fitted values
+en.testX = model.matrix(emission.sum ~ dept.total.area + PrimaryUse 
+                 + TAVG + TMAX + TMIN + HTDD + CLDD + EMXT + EMNT 
+                 + DX90 + DX32 + DT32 + PRCP + EMXP + DP01 + DP05 + DP10
+                 + sum.n_course. -1, data = test)
+en.fitted = predict(en, newx = en.testX, s = "lambda.min",type="response")
+
+```  
+Selected variables (lambda.min):  
+dept.total.area, PrimaryUse, DX32, sum.n_course.  
+
+#### Random Forest  
+```{r, echo=FALSE}
+# Fit a random forest
+rf = randomForest(emission.sum ~ dept.total.area + PrimaryUse 
+                  + TAVG + TMAX + TMIN + HTDD + CLDD + EMXT + EMNT 
+                  + DX90 + DX32 + DT32 + PRCP + EMXP + DP01 + DP05 + DP10
+                  + sum.n_course., data = train, importance = TRUE)
+
+# Plot the mean squared error
+plot(rf)
+
+# Find the variable importance
+importance(rf)
+
+# Save the predicted values
+rf.fitted = predict(rf, newdata = test)
+
+# Plot the predicted values versus the truth
+plot_data = data.frame(test$emission.sum, rf.fitted)
+names(plot_data) = c("TrueEmission", "RandomForest")
+p = ggplot(plot_data, aes(y = TrueEmission))
+p + geom_point(aes(x = RandomForest), color="green") +
+  geom_abline(slope=1) + xlab("Fitted Value")  
+```  
+
+Selected variables:  
+dept.total.area, PrimaryUse, sum.n_course.  
+
+#### xgboost
+```{r}
+library(xgboost)
+
+xgb.X = sparse.model.matrix(emission.sum ~ dept.total.area + PrimaryUse 
+                 + TAVG + TMAX + TMIN + HTDD + CLDD + EMXT + EMNT 
+                 + DX90 + DX32 + DT32 + PRCP + EMXP + DP01 + DP05 + DP10
+                 + sum.n_course. -1, data = train)
+xgb.Y = train$emission.sum
+
+xgb = xgboost(data = xgb.X, label = xgb.Y, max_depth = 4, eta = 1, nthread = 2, nrounds = 300, early_stopping_rounds = 3 ,objective = "reg:linear")
+
+importance <- xgb.importance(feature_names = xgb.X@Dimnames[[2]], model = xgb)
+xgb.plot.importance(importance_matrix = importance)
+
+xgb.testX = sparse.model.matrix(emission.sum ~ dept.total.area + PrimaryUse 
+                 + TAVG + TMAX + TMIN + HTDD + CLDD + EMXT + EMNT 
+                 + DX90 + DX32 + DT32 + PRCP + EMXP + DP01 + DP05 + DP10
+                 + sum.n_course. -1, data = test)
+xgb.fitted = predict(xgb,xgb.testX)
+
+```  
+
+Selected variables:  
+dept.total.area, sum.n_course, CLDD, PrimaryUse...  
+
+
+## Predictive Modeling  
+```{r, echo=FALSE}
+# Plot predicted values of all methods versus the truth (Random Forest and xgboost had the best performance)
+plot_data = data.frame(test$emission.sum[1:318], lasso.fitted.lse, lasso.fitted.min, en.fitted, rf.fitted[1:318],xgb.fitted)
+names(plot_data) = c("TrueEmission", "Lasso.lse", "Lasso.min","Elastic Net", "RandomForest","xgboost")
+pd.melt <- melt(plot_data, id.vars = "TrueEmission", variable.name = "Method", 
+                       value.name = "Prediction")
+ggplot(pd.melt, aes(x = Prediction, y = TrueEmission, color = Method)) + 
+  geom_point() + geom_abline(slope=1)  
+
+# Compare the best two
+plot_data = data.frame(test$emission.sum[1:318], rf.fitted[1:318],xgb.fitted)
+names(plot_data) = c("TrueEmission", "RandomForest","xgboost")
+pd.melt <- melt(plot_data, id.vars = "TrueEmission", variable.name = "Method", 
+                       value.name = "Prediction")
+ggplot(pd.melt, aes(x = Prediction, y = TrueEmission, color = Method)) + 
+  geom_point() + geom_abline(slope=1)  
+```  
+
+Random Forest still has the best prediction among all models tested.  
